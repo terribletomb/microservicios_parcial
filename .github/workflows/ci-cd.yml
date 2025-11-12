@@ -1,0 +1,19 @@
+name: CI/CD Go Microservicios
+
+on: [push, pull_request]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.20
+      - name: Ejecutar pruebas
+        run: go test ./... -v -cover
+      - name: Análisis de seguridad
+        uses: securego/gosec@master
+      - name: Construir imagen Docker
+        run: docker build -t usuario/create-service:latest ./services/create-service
