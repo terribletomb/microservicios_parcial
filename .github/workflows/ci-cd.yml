@@ -1,146 +1,103 @@
-name: CI/CD Microservicios Golang
+name: CI Pipeline
 
 on:
   push:
-    branches: [ "main" ]
-    tags:
-      - "v*.*.*"
+    branches: [ main ]
+    tags: [ 'v*.*.*' ]
   pull_request:
-    branches: [ "main" ]
 
 jobs:
 
-  # ============================
-  # 1. PRUEBAS UNITARIAS E INTEGRACIÓN
-  # ============================
   tests:
-    name: Ejecutar pruebas
+    name: Run Tests
     runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22
+
+      - name: Run tests for each microservice
+        run: |
+          for d in create read update delete; do
+            echo "===> Testing $d"
+            cd $d
+            go test ./... -coverprofile=coverage.out
+            cd ..
+          done
+
+  build:
+    name: Build Images
+    runs-on: ubuntu-latest
+    needs: tests
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Instalar Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-
-      - name: Ejecutar pruebas con cobertura
-        run: |
-          go test ./... -coverprofile=coverage.out
-          go tool cover -func=coverage.out
-
-      - name: Guardar cobertura como artefacto
-        uses: actions/upload-artifact@v4
-        with:
-          name: cobertura
-          path: coverage.out
-
-  # ============================
-  # 2. CONSTRUCCIÓN DE IMÁGENES CON BUILDX
-  # ============================
-  build:
-    name: Build Docker Images
-    runs-on: ubuntu-latest
-    needs: tests
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configurar Docker Buildx
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login a DockerHub
+      - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USER }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASS }}
 
-      - name: Login a GitHub Container Registry
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Construir imágenes de los microservicios
+      - name: Build & Push Images
         run: |
-          docker build -t ${{ secrets.DOCKERHUB_USER }}/create-service:latest ./services/create-service
-          docker build -t ${{ secrets.DOCKERHUB_USER }}/read-service:latest ./services/read-service
-          docker build -t ${{ secrets.DOCKERHUB_USER }}/update-service:latest ./services/update-service
-          docker build -t ${{ secrets.DOCKERHUB_USER }}/delete-service:latest ./services/delete-service
+          SERVICES="create read update delete"
+          for SVC in $SERVICES; do
+            IMAGE_DH="${{ secrets.DOCKER_USER }}/$SVC:latest"
+            IMAGE_GHCR="ghcr.io/${{ github.repository_owner }}/$SVC:latest"
 
-  # ============================
-  # 3. ESCANEO DE SEGURIDAD CON TRIVY
-  # ============================
-  security_scan:
-    name: Escaneo con Trivy
+            echo "===> Building $SVC"
+            docker build -t $IMAGE_DH -t $IMAGE_GHCR ./$SVC
+            docker push $IMAGE_DH
+            docker push $IMAGE_GHCR
+          done
+
+  security:
+    name: Trivy Security Scan
     runs-on: ubuntu-latest
     needs: build
 
     steps:
-      - name: Descargar imágenes
-        run: |
-          docker pull ${{ secrets.DOCKERHUB_USER }}/create-service:latest
-          docker pull ${{ secrets.DOCKERHUB_USER }}/read-service:latest
-          docker pull ${{ secrets.DOCKERHUB_USER }}/update-service:latest
-          docker pull ${{ secrets.DOCKERHUB_USER }}/delete-service:latest
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Ejecutar Trivy
-        uses: aquasecurity/trivy-action@master
+      - name: Install Trivy
+        uses: aquasecurity/trivy-action@0.22.0
         with:
-          image-ref: ${{ secrets.DOCKERHUB_USER }}/create-service:latest
-          format: "table"
-          exit-code: "0"
+          scan-type: fs
+          exit-code: 0
+          ignore-unfixed: true
 
-  # ============================
-  # 4. PUSH A DOCKERHUB + GHCR
-  # ============================
-  push_images:
-    name: Push de imágenes
+  release:
+    name: Auto Release
     runs-on: ubuntu-latest
-    needs: [build, security_scan]
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Login DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USER }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Login GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push de imágenes
-        run: |
-          docker push ${{ secrets.DOCKERHUB_USER }}/create-service:latest
-          docker push ${{ secrets.DOCKERHUB_USER }}/read-service:latest
-          docker push ${{ secrets.DOCKERHUB_USER }}/update-service:latest
-          docker push ${{ secrets.DOCKERHUB_USER }}/delete-service:latest
-
-  # ============================
-  # 5. RELEASE AUTOMÁTICO AL CREAR TAG
-  # ============================
-  release:
-    name: Crear Release
-    runs-on: ubuntu-latest
-    needs: push_images
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    steps:
-      - name: Crear Release en GitHub
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Release ${{ github.ref_name }}"
           tag_name: ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          
+          name: Release ${{ github.ref_name }}
+          files: |
+            **/coverage.out
 
